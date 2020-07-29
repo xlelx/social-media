@@ -1,134 +1,140 @@
 const functions = require('firebase-functions');
-const admin = require('firebase-admin');
 
-admin.initializeApp();
+const { getAllScreams, postScream, getScream, postComment, likeScream, unlikeScream, deleteScream } = require('./handlers/screams')
 
-const config = {
-    apiKey: "AIzaSyC5DWRHnyYwSoTW2-GmXgDwPuTqPaTmRdM",
-    authDomain: "social-media-leo.firebaseapp.com",
-    databaseURL: "https://social-media-leo.firebaseio.com",
-    projectId: "social-media-leo",
-    storageBucket: "social-media-leo.appspot.com",
-    messagingSenderId: "93949716859",
-    appId: "1:93949716859:web:61949096951375695135de",
-    measurementId: "G-G0687BKC1N"
-  };
+const { signup, login, uploadImage, addUserDetails, getAuthenticatedUser, getUserDetails, markNotificationsRead } = require('./handlers/users');
 
-const firebase = require('firebase');
-firebase.initializeApp(config);
+const { FBAuth } = require('./util/FBAuth');
 
 const app = require('express')();
+const { db } = require('./util/admin');
 
-const db = admin.firestore();
+//scream routes
+app.get('/screams', getAllScreams);
+app.post('/scream', FBAuth, postScream);
+app.get('/scream/:screamId', getScream);
+app.delete('/scream/:screamId', FBAuth, deleteScream);
+app.get('/screams/:screamId/like', FBAuth, likeScream);
+app.get('/screams/:screamId/unlike', FBAuth, unlikeScream);
+app.post('/screams/:screamId/comment', FBAuth, postComment);
 
-app.get('/screams', (req, res)=>{
-    db
-    .collection('screams')
-    .orderBy('createdAt', 'desc')
-    .get()
-    .then(data=>{
-        let screams = [];
-        data.forEach((doc)=>{
-            screams.push({
-                screamId: doc.id,
-                ...doc.data()
-            });
-        });
-        return res.json(screams);
-    })
-    .catch(err=>{
-        console.error(err);
-    })
-});
 
-app.post('/scream', (req, res)=>{
-    const newScream = {
-        body: req.body.body,
-        userHandle: req.body.userHandle,
-        createdAt: new Date().toISOString()
-    };
-    db
-    .collection('screams')
-    .add(newScream)
-    .then(doc=>{
-        res.json({message: `document ${doc.id} created sucessfully`});
-    })
-    .catch(err=>{
-        res.status(500).json({error: 'something went wrong'});
-        console.error(err);
-    })
-});
-
-const isEmpty = (string) => {
-    return string.trim() === "";
-}
-
-const isEmail = (email)=>{
-    const regEx = /^(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
-    return email.match(regEx);
-}
-//Signup route
-app.post('/signup', (req, res)=>{   
-    const newUser = {   
-        email: req.body.email,
-        password: req.body.password,
-        confirmPassword: req.body.confirmPassword,
-        handle: req.body.handle,    
-    }
-        
-    let errors = {};
-    if (isEmpty(newUser.email)) {
-        errors.email = "must not be empty";
-    } else if (!isEmail(newUser.email)){
-        errors.email = "must be a valid email address";
-    }
-
-    if (isEmpty(newUser.password)) errors.password = "must not be empty";
-
-    if (newUser.confirmPassword !== newUser.confirmPassword) errors.confirmPassword = "passwords much match";
-
-    if (isEmpty(newUser.handle)) errors.handle = "must not be empty"    ;
-
-    if (Object.keys(errors).length > 0) return res.status(400).json(errors);
-    //validate data
-    let token, userId;
-    db.doc(`/users/${newUser.handle}`).get()
-    .then(doc => {
-        if (doc.exists){
-            return res.status(400).json({handle: 'this handle is already taken'});
-        }
-        else{
-            return firebase
-            .auth()
-            .createUserWithEmailAndPassword(newUser.email, newUser.password);
-        }
-    })
-    .then(data => {
-        userId = data.user.uid;
-        return data.user.getIdToken();
-    })
-    .then(idtoken =>{
-        token = idtoken;
-        const userCredentials = {
-            handle: newUser.handle,
-            email: newUser.email,
-            createdAt: new Date().toISOString(),
-            userId
-        };
-        return db.doc(`/users/${newUser.handle}`).set(userCredentials);
-    })
-    .then(()=>{
-        return res.status(201).json({ token });
-    })
-    .catch(err=>{
-        console.error(err);
-        if (err.code === "auth/email-already-in-use"){
-            return res.status(400).json({email: "email is already in use"});
-        }
-        return res.status(500).json({error: err.code});
-    })
-})
+//user routes
+app.post('/signup', signup);
+app.post('/login', login);
+app.get('/user', FBAuth, getAuthenticatedUser);
+app.post('/user/image', FBAuth, uploadImage);
+app.post('/user', FBAuth, addUserDetails);
+app.get('/user/:handle', getUserDetails);
+app.post('/notifications', FBAuth, markNotificationsRead);
 
 
 // http://baseurl.com/api/
 exports.api = functions.https.onRequest(app);
+
+exports.createNotificationOnLike = functions
+    .firestore
+    .document('likes/{id}')
+    .onCreate(async (snapshot) => {
+
+        try {
+            const scream = await db.doc(`/screams/${snapshot.data().screamId}`).get()
+
+            if (scream.exists && scream.data().userHandle !== snapshot.data().userHandle) {
+                return await db.doc(`notifications/${snapshot.id}`).set({
+                    createdAt: new Date().toISOString(),
+                    recipient: scream.data().userHandle,
+                    sender: snapshot.data().userHandle,
+                    type: 'like',
+                    read: false,
+                    screamId: scream.id
+                })
+            }
+
+        } catch (err) {
+            console.error(err)
+        }
+
+    });
+exports.deleteNotificationOnUnlike = functions.firestore.document('likes/{id}')
+    .onDelete(snapshot => {
+        return db.doc(`/notifications/${snapshot.id}`)
+            .delete()
+            .catch(err => {
+                console.error(err);
+            })
+    });
+
+exports.createNotificationOnComment = functions
+    .firestore
+    .document('comments/{id}')
+    .onCreate(async snapshot => {
+
+        try {
+            const scream = await db.doc(`screams/${snapshot.data().screamId}`).get()
+
+            if (scream.exists && scream.data().userHandle !== snapshot.data().userHandle) {
+                return await db.doc(`notifications/${snapshot.id}`).set({
+                    createdAt: new Date().toISOString(),
+                    recipient: scream.data().userHandle,
+                    sender: snapshot.data().userHandle,
+                    type: 'comment',
+                    read: false,
+                    screamId: scream.id
+                })
+            }
+        } catch (err) {
+            console.error(err)
+        }
+    })
+
+exports.onUserImageChange = functions
+    .firestore
+    .document('/users/{id}')
+    .onUpdate((change) => {
+        if (change.before.data().imageUrl !== change.after.data().imageUrl){
+            const batch = db.batch();
+            return db.collection('screams').where('userHandle', '==', change.before.data().handle).get()
+            .then( data => {
+                data.forEach(doc => {
+                    const scream = db.doc(`/screams/${doc.id}`);
+                    batch.update(scream, { userImage: change.after.data().imageUrl});
+                })
+                return batch.commit();
+            })
+        }
+        else return true;
+    })
+
+exports.onScreamDelete = functions
+.firestore
+.document('/screams/{id}')
+.onDelete( (snapshot, context) => {
+    const screamId = context.params.id;
+    const batch = db.batch();
+    return db.collection('comments')
+    .where('screamId', '==', screamId).get()
+    .then(data => {
+        data.forEach( doc => {
+            batch.delete(doc.ref);
+        })
+        return db.collection('likes')
+        .where('screamId', '==', screamId).get()
+    })
+    .then(data => {
+        data.forEach( doc => {
+            batch.delete(doc.ref);
+        })
+        return db.collection('notifications')
+        .where('screamId', '==', screamId).get()
+    })
+    .then(data => {
+        data.forEach( doc => {
+            batch.delete(doc.ref);
+        })
+        return batch.commit()
+    })
+    .catch(err=>{
+        console.error(err);
+    })
+})
